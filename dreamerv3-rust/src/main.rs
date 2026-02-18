@@ -1,13 +1,14 @@
 #![recursion_limit = "256"]
 
+use burn::backend::Autodiff;
 use burn::prelude::Backend;
 use clap::Parser;
 use log::info;
 
 use dreamerv3::config::{DreamerConfig, size_config};
-use dreamerv3::envs::DummyEnv;
+use dreamerv3::envs::{DummyEnv, SocketEnv};
 use dreamerv3::models::agent::DreamerV3AgentConfig;
-use dreamerv3::training::Trainer;
+use dreamerv3::training::AutodiffTrainer;
 
 /// DreamerV3: Mastering Diverse Domains through World Models
 ///
@@ -64,6 +65,18 @@ struct Cli {
     /// Config YAML file path (optional)
     #[arg(long)]
     config: Option<String>,
+
+    /// Environment bridge address (host:port) for SocketEnv
+    #[arg(long)]
+    env_addr: Option<String>,
+
+    /// Checkpoint directory for saving/loading
+    #[arg(long)]
+    checkpoint: Option<String>,
+
+    /// Resume from checkpoint if available
+    #[arg(long, default_value_t = false)]
+    resume: bool,
 }
 
 fn main() {
@@ -116,35 +129,35 @@ fn main() {
 
 fn run_with_ndarray(config: DreamerConfig, cli: &Cli) {
     use burn::backend::NdArray;
-    type B = NdArray;
+    type InnerB = NdArray;
 
     let device = burn::backend::ndarray::NdArrayDevice::Cpu;
-    info!("Using NdArray (CPU) backend");
+    info!("Using NdArray (CPU) backend with Autodiff");
 
-    run_training::<B>(config, cli, device);
+    run_training::<InnerB>(config, cli, device);
 }
 
 fn run_with_wgpu(config: DreamerConfig, cli: &Cli) {
     use burn::backend::Wgpu;
-    type B = Wgpu;
+    type InnerB = Wgpu;
 
     let device = burn::backend::wgpu::WgpuDevice::default();
-    info!("Using WGPU (GPU) backend");
+    info!("Using WGPU (GPU) backend with Autodiff");
 
-    run_training::<B>(config, cli, device);
+    run_training::<InnerB>(config, cli, device);
 }
 
-fn run_training<B: Backend>(config: DreamerConfig, cli: &Cli, device: B::Device) {
+fn run_training<InnerB: Backend>(config: DreamerConfig, cli: &Cli, device: InnerB::Device) {
     let image_size = config.env.image_size;
     let n_actions = cli.n_actions;
 
-    // Create agent
+    // Create agent with Autodiff backend
     let agent_config = DreamerV3AgentConfig::for_discrete_actions(
         image_size,
         3, // RGB
         n_actions,
     );
-    let agent = agent_config.init::<B>(&device);
+    let agent = agent_config.init::<Autodiff<InnerB>>(&device);
 
     info!("Agent created with {} discrete actions", n_actions);
     info!(
@@ -152,34 +165,58 @@ fn run_training<B: Backend>(config: DreamerConfig, cli: &Cli, device: B::Device)
         config.model.rssm.deter + config.model.rssm.stoch * config.model.rssm.classes
     );
 
-    // Create environment
-    match cli.task.as_str() {
-        "dummy" => {
-            let mut env = DummyEnv::new(
-                [image_size[0], image_size[1], 3],
-                n_actions,
-                1000,
-            );
-            info!("Created DummyEnv");
+    // Determine checkpoint directory
+    let checkpoint_dir = cli
+        .checkpoint
+        .clone()
+        .unwrap_or_else(|| format!("{}/checkpoints", cli.logdir));
 
-            // Create trainer and run
-            let mut trainer = Trainer::new(config, agent, device);
-            trainer.train(&mut env);
+    // Create environment and run training with autodiff
+    if let Some(ref addr) = cli.env_addr {
+        // Connect to external Gymnasium environment via TCP socket
+        info!("Connecting to environment at {}...", addr);
+        let mut env = SocketEnv::connect(addr)
+            .unwrap_or_else(|e| panic!("Failed to connect to env at {}: {}", addr, e));
+        info!("Connected to SocketEnv at {}", addr);
+
+        let mut trainer = AutodiffTrainer::<InnerB>::new(config, agent, device);
+        if cli.resume {
+            trainer.maybe_load_checkpoint(&checkpoint_dir);
         }
-        _ => {
-            // For other environments, we'd need bindings to
-            // Gymnasium, ALE, DMC, etc. Using dummy for now.
-            eprintln!(
-                "Environment '{}' not yet implemented in Rust. Using DummyEnv.",
-                cli.task
-            );
-            let mut env = DummyEnv::new(
-                [image_size[0], image_size[1], 3],
-                n_actions,
-                1000,
-            );
-            let mut trainer = Trainer::new(config, agent, device);
-            trainer.train(&mut env);
+        trainer.set_checkpoint_dir(&checkpoint_dir);
+        trainer.train_autodiff(&mut env);
+    } else {
+        match cli.task.as_str() {
+            "dummy" => {
+                let mut env = DummyEnv::new(
+                    [image_size[0], image_size[1], 3],
+                    n_actions,
+                    1000,
+                );
+                info!("Created DummyEnv");
+
+                let mut trainer = AutodiffTrainer::<InnerB>::new(config, agent, device);
+                if cli.resume {
+                    trainer.maybe_load_checkpoint(&checkpoint_dir);
+                }
+                trainer.set_checkpoint_dir(&checkpoint_dir);
+                trainer.train_autodiff(&mut env);
+            }
+            _ => {
+                eprintln!(
+                    "Environment '{}' not implemented. Use --env-addr to connect to a Python bridge, or use 'dummy'.",
+                    cli.task
+                );
+                eprintln!(
+                    "Example: python scripts/gym_bridge.py --task {} --port 9876",
+                    cli.task
+                );
+                eprintln!(
+                    "Then run: dreamerv3 --task {} --env-addr 127.0.0.1:9876",
+                    cli.task
+                );
+                std::process::exit(1);
+            }
         }
     }
 }
