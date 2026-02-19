@@ -351,6 +351,42 @@ impl Default for EnvConfig {
     }
 }
 
+/// Apply per-task preset configuration overrides matching the Python configs.yaml.
+///
+/// Task format: `{suite}_{task}` (e.g., `crafter_reward`, `dmc_walker_walk`, `atari_pong`)
+pub fn task_config(config: &mut DreamerConfig) {
+    let suite = config.env.task.split('_').next().unwrap_or("").to_string();
+    match suite.as_str() {
+        "crafter" => {
+            config.env.image_size = [64, 64];
+            config.env.action_repeat = 1;
+            config.run.steps = 1_100_000;
+            config.run.train_ratio = 512.0;
+            config.run.envs = 1;
+        }
+        "dmc" => {
+            config.env.image_size = [64, 64];
+            config.env.action_repeat = 1;
+            config.run.steps = 1_100_000;
+            config.run.train_ratio = 256.0;
+        }
+        "atari" => {
+            config.env.image_size = [64, 64];
+            config.env.action_repeat = 4;
+            config.run.steps = 51_000_000;
+            config.run.train_ratio = 32.0;
+        }
+        "atari100k" => {
+            config.env.image_size = [64, 64];
+            config.env.action_repeat = 4;
+            config.run.steps = 110_000;
+            config.run.envs = 1;
+            config.run.train_ratio = 256.0;
+        }
+        _ => {}
+    }
+}
+
 /// Predefined model size configurations matching the Python implementation.
 pub fn size_config(size: &str) -> ModelConfig {
     match size {

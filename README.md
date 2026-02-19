@@ -79,8 +79,11 @@ dreamerv3-rust/
 - **Rust** 1.75+ (2021 edition)
 - **Burn** 0.16 with `ndarray` (CPU) or `wgpu` (GPU) backend
 
-For connecting to Gymnasium environments:
-- **Python** 3.9+ with `gymnasium` installed
+For training on real environments (auto-launched via Python bridge):
+- **Python** 3.9+ with `numpy`
+- **Crafter**: `pip install crafter`
+- **DMC Vision**: `pip install dm_control`
+- **Atari**: `pip install gymnasium[atari] ale-py`
 
 ## Build
 
@@ -91,55 +94,69 @@ cargo build --release
 
 ## Quick Start
 
-### Training with DummyEnv (no Python required)
+### Crafter
 
 ```sh
-cargo run --release -- --task dummy --steps 100000 --backend ndarray
+pip install crafter
+cargo run --release -- --task crafter_reward
 ```
 
-### Training with Gymnasium environment
-
-1. Start the Python bridge server:
+### DMC Vision (DeepMind Control)
 
 ```sh
-python scripts/gym_bridge.py --task CartPole-v1 --port 9876
+pip install dm_control
+cargo run --release -- --task dmc_walker_walk
+cargo run --release -- --task dmc_cartpole_swingup
+cargo run --release -- --task dmc_cheetah_run
 ```
 
-2. Run the Rust agent:
+### Atari
 
 ```sh
-cargo run --release -- \
-  --task CartPole-v1 \
-  --env-addr 127.0.0.1:9876 \
-  --steps 1000000 \
-  --backend ndarray
+pip install gymnasium[atari] ale-py
+cargo run --release -- --task atari_pong
+cargo run --release -- --task atari_breakout
+```
+
+### DummyEnv (no Python required)
+
+```sh
+cargo run --release -- --task dummy --steps 100000
+```
+
+### Manual bridge mode
+
+For environments not auto-detected, start the bridge manually:
+
+```sh
+python scripts/gym_bridge.py --task gym_CartPole-v1 --port 9876
+cargo run --release -- --task gym_CartPole-v1 --env-addr 127.0.0.1:9876
 ```
 
 ### Using GPU (WGPU backend)
 
 ```sh
-cargo run --release -- \
-  --task dummy \
-  --backend wgpu \
-  --steps 1000000
+cargo run --release -- --task crafter_reward --backend wgpu
 ```
 
 ## CLI Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--task` | `dummy` | Environment name |
+| `--task` | `dummy` | Task (e.g., `crafter_reward`, `dmc_walker_walk`, `atari_pong`) |
 | `--size` | `12m` | Model size: `1m`, `12m`, `25m`, `50m`, `200m` |
-| `--steps` | `1000000` | Total environment steps |
+| `--steps` | per-task | Total environment steps (0 = use task preset) |
 | `--batch-size` | `16` | Training batch size |
 | `--batch-length` | `64` | Sequence length per batch |
 | `--lr` | `4e-5` | Learning rate |
 | `--backend` | `ndarray` | Compute backend: `ndarray` (CPU) or `wgpu` (GPU) |
-| `--image-size` | `64` | Observation image resolution |
-| `--n-actions` | `18` | Number of discrete actions |
+| `--image-size` | per-task | Observation image resolution (0 = use task preset) |
+| `--n-actions` | auto | Number of discrete actions (0 = auto-detect from bridge) |
 | `--logdir` | `logdir` | Log output directory |
 | `--config` | — | Path to YAML config file |
-| `--env-addr` | — | TCP address for SocketEnv (e.g., `127.0.0.1:9876`) |
+| `--env-addr` | — | Manual bridge address (auto-launched if omitted) |
+| `--bridge-port` | `9876` | Port for auto-launched Python bridge |
+| `--python` | `python3` | Python executable for the bridge |
 | `--checkpoint` | — | Checkpoint directory |
 | `--resume` | `false` | Resume training from checkpoint |
 | `--seed` | `0` | Random seed |
@@ -169,23 +186,40 @@ Checkpoint contents:
 - `agent.mpk` — full model weights (world model + policy + value networks)
 - `metrics.json` — training progress (total steps, train steps, episodes)
 
-## Connecting to Gymnasium Environments
+## Supported Environments
 
-The `SocketEnv` communicates with Python Gymnasium via a TCP socket using a JSON-line protocol.
-The included `scripts/gym_bridge.py` bridge supports any Gymnasium-compatible environment.
+The Python bridge (`scripts/gym_bridge.py`) is auto-launched when you specify a known task.
+It supports the same `{suite}_{task}` naming convention as the original DreamerV3.
+
+| Suite | Task format | Action type | Python package |
+|-------|-------------|-------------|----------------|
+| Crafter | `crafter_reward`, `crafter_noreward` | Discrete (17) | `crafter` |
+| DMC Vision | `dmc_walker_walk`, `dmc_cartpole_swingup`, `dmc_cheetah_run`, ... | Continuous | `dm_control` |
+| Atari | `atari_pong`, `atari_breakout`, `atari_qbert`, ... | Discrete | `gymnasium[atari]`, `ale-py` |
+| Gymnasium | `gym_CartPole-v1`, `gym_MountainCar-v0`, ... | Varies | `gymnasium` |
+
+### Task presets
+
+Each suite applies sensible defaults matching the original configs.yaml:
+
+| Suite | Image size | Action repeat | Train ratio | Steps |
+|-------|-----------|---------------|-------------|-------|
+| `crafter` | 64x64 | 1 | 512 | 1.1M |
+| `dmc` | 64x64 | 1 | 256 | 1.1M |
+| `atari` | 64x64 | 4 | 32 | 51M |
+| `atari100k` | 64x64 | 4 | 256 | 110K |
+
+### Manual bridge mode
+
+You can also start the bridge manually for full control:
 
 ```sh
-# Atari
-python scripts/gym_bridge.py --task ALE/Pong-v5 --port 9876
-
-# Classic control
-python scripts/gym_bridge.py --task CartPole-v1 --port 9876
-
-# Custom image size
-python scripts/gym_bridge.py --task ALE/Breakout-v5 --port 9876 --image-size 64
+python scripts/gym_bridge.py --task dmc_walker_walk --port 9876 --image-size 64
+cargo run --release -- --task dmc_walker_walk --env-addr 127.0.0.1:9876
 ```
 
-Protocol:
+### Bridge protocol (JSON lines over TCP)
+
 - `{"command": "info"}` — returns observation/action space info
 - `{"command": "reset"}` — resets the environment
 - `{"command": "step", "action_discrete": 3}` — steps with a discrete action
